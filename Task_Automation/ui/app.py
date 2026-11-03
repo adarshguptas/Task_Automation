@@ -1,386 +1,453 @@
-﻿import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+﻿
+import tkinter as tk
+from tkinter import filedialog, messagebox
 from pathlib import Path
+import threading
 import math
+import time
 
-from core.organizer import scan_images, organize_images
-from core.duplicates import find_duplicates
 from core.backup import create_backup, restore_backup
+from core.duplicates import find_duplicates
+from core.organizer import scan_images, organize_images
 from core.logger import get_logger
+
+try:
+    from PIL import Image, ImageTk
+except ImportError:
+    Image = None
+    ImageTk = None
+
+
+BG = "#090914"
+PANEL = "#121326"
+PANEL2 = "#191a31"
+WHITE = "#f3f4ff"
+MUTED = "#9295b4"
+CYAN = "#00f5ff"
+PURPLE = "#a855f7"
+PINK = "#ff38c7"
+GREEN = "#39ff9c"
+ORANGE = "#ffb347"
+
+
+class Hologram(tk.Canvas):
+    def __init__(self, parent, **kwargs):
+        super().__init__(
+            parent, bg=BG, highlightthickness=0, **kwargs
+        )
+        self.phase = 0
+        self.bind("<Configure>", self.draw)
+        self.animate()
+
+    def animate(self):
+        self.phase += 0.045
+        self.draw()
+        self.after(35, self.animate)
+
+    def draw(self, event=None):
+        self.delete("all")
+        w = max(self.winfo_width(), 250)
+        h = max(self.winfo_height(), 200)
+        cx, cy = w / 2, h / 2
+        radius = min(w, h) * 0.29
+
+        colors = [CYAN, PURPLE, PINK, GREEN]
+        self.create_oval(
+            cx-radius-22, cy-radius-22,
+            cx+radius+22, cy+radius+22,
+            outline="#282449", width=2
+        )
+
+        for i, color in enumerate(colors):
+            angle = self.phase + i * math.pi / 2
+            x = cx + math.cos(angle) * radius * 0.2
+            y = cy + math.sin(angle) * radius * 0.2
+            self.create_oval(
+                x-radius, y-radius, x+radius, y+radius,
+                outline=color, width=2
+            )
+
+        # Holographic core
+        for i in range(12, 0, -1):
+            r = radius * i / 12
+            color = colors[i % len(colors)]
+            self.create_oval(
+                cx-r, cy-r, cx+r, cy+r,
+                outline=color, width=1
+            )
+
+        self.create_oval(
+            cx-radius*0.43, cy-radius*0.43,
+            cx+radius*0.43, cy+radius*0.43,
+            fill="#21183d", outline=CYAN, width=2
+        )
+        self.create_text(
+            cx, cy-8, text="TASK",
+            fill=WHITE, font=("Segoe UI", 17, "bold")
+        )
+        self.create_text(
+            cx, cy+17, text="AUTOMATION CORE",
+            fill=CYAN, font=("Consolas", 8, "bold")
+        )
+
+        for i in range(28):
+            angle = self.phase * 0.5 + i * math.tau / 28
+            r = radius + 28 + math.sin(self.phase+i)*7
+            x = cx + math.cos(angle)*r
+            y = cy + math.sin(angle)*r
+            self.create_oval(
+                x-2, y-2, x+2, y+2,
+                fill=colors[i % 4], outline=""
+            )
 
 
 class TaskAutomationApp:
-
     def __init__(self, root):
         self.root = root
+        self.root.title("TASK AUTOMATION PRO | RGB HOLOGRAPHIC")
+        self.root.geometry("1200x760")
+        self.root.minsize(950, 650)
+        self.root.configure(bg=BG)
+
         self.project = Path(__file__).resolve().parent.parent
         self.logger = get_logger()
+        self.current_page = None
+        self.image_files = []
+        self.duplicate_groups = []
+        self.preview_image = None
 
-        self.source = tk.StringVar(
-            value=str(self.project / "source_images")
-        )
-        self.destination = tk.StringVar(
-            value=str(self.project / "destination_images")
-        )
-
-        self.photo_reference = None
-
-        self.root.title("TASK AUTOMATION PRO 2.0")
-        self.root.geometry("1150x760")
-        self.root.minsize(950, 650)
-        self.root.configure(bg="#10131c")
-
-        self.setup_style()
-        self.build_interface()
+        self.build_layout()
+        self.show_page("Dashboard")
         self.refresh_dashboard()
         self.refresh_logs()
 
-        self.root.after(3000, self.live_refresh)
-
-    def setup_style(self):
-        style = ttk.Style()
-        style.theme_use("clam")
-
-        style.configure(
-            "TNotebook",
-            background="#10131c",
-            borderwidth=0
-        )
-        style.configure(
-            "TNotebook.Tab",
-            background="#252b3a",
-            foreground="white",
-            padding=(17, 11),
-            font=("Segoe UI", 10, "bold")
-        )
-        style.map(
-            "TNotebook.Tab",
-            background=[("selected", "#7c3aed")],
-            foreground=[("selected", "white")]
-        )
-        style.configure(
-            "Treeview",
-            background="#1b2030",
-            foreground="white",
-            fieldbackground="#1b2030",
-            rowheight=28
-        )
-        style.configure(
-            "Treeview.Heading",
-            background="#30384b",
-            foreground="white"
-        )
-        style.configure(
-            "Horizontal.TProgressbar",
-            troughcolor="#252b3a",
-            background="#a78bfa"
-        )
-
-    def button(self, parent, title, command):
-        return tk.Button(
-            parent,
-            text=title,
-            command=command,
-            bg="#7c3aed",
-            fg="white",
-            activebackground="#6d28d9",
-            activeforeground="white",
-            relief="flat",
-            font=("Segoe UI", 10, "bold"),
-            padx=15,
-            pady=9,
-            cursor="hand2"
-        )
-
-    def heading(self, parent, title, subtitle):
-        tk.Label(
-            parent, text=title,
-            bg="#10131c", fg="white",
-            font=("Segoe UI", 20, "bold")
-        ).pack(anchor="w", padx=22, pady=(22, 5))
-
-        tk.Label(
-            parent, text=subtitle,
-            bg="#10131c", fg="#a78bfa",
-            font=("Segoe UI", 10)
-        ).pack(anchor="w", padx=22, pady=(0, 18))
-
-    def build_interface(self):
-        header = tk.Frame(
-            self.root, bg="#171c2a", height=85
-        )
-        header.pack(fill="x")
+    def build_layout(self):
+        header = tk.Frame(self.root, bg=BG, height=75)
+        header.pack(fill="x", padx=22, pady=(14, 5))
         header.pack_propagate(False)
 
         tk.Label(
-            header,
-            text="TASK AUTOMATION PRO",
-            bg="#171c2a", fg="white",
-            font=("Segoe UI", 22, "bold")
-        ).pack(anchor="w", padx=24, pady=(12, 0))
+            header, text="◈ TASK AUTOMATION",
+            bg=BG, fg=CYAN,
+            font=("Segoe UI", 21, "bold")
+        ).pack(side="left")
 
         tk.Label(
-            header,
-            text="PYTHON DESKTOP PRODUCTIVITY SUITE  |  VERSION 2.0",
-            bg="#171c2a", fg="#a78bfa",
-            font=("Segoe UI", 9, "bold")
-        ).pack(anchor="w", padx=26)
+            header, text="PRO 3.0  |  HOLOGRAPHIC EDITION",
+            bg=BG, fg=PINK,
+            font=("Consolas", 10, "bold")
+        ).pack(side="right", padx=10)
 
-        self.notebook = ttk.Notebook(self.root)
-        self.notebook.pack(
-            fill="both", expand=True, padx=15, pady=15
+        tk.Frame(
+            self.root, bg=PURPLE, height=1
+        ).pack(fill="x", padx=22)
+
+        body = tk.Frame(self.root, bg=BG)
+        body.pack(fill="both", expand=True, padx=18, pady=15)
+
+        self.sidebar = tk.Frame(
+            body, bg=PANEL, width=205
         )
+        self.sidebar.pack(side="left", fill="y", padx=(0, 15))
+        self.sidebar.pack_propagate(False)
 
-        self.tabs = {}
+        tk.Label(
+            self.sidebar, text="CONTROL CENTER",
+            bg=PANEL, fg=MUTED,
+            font=("Consolas", 10, "bold")
+        ).pack(anchor="w", padx=17, pady=(22, 18))
 
-        for key, title in [
-            ("dashboard", "Dashboard"),
-            ("organizer", "Image Organizer"),
-            ("duplicates", "Duplicates"),
-            ("backup", "Backup & Restore"),
-            ("logs", "Activity Logs")
+        self.pages = {}
+        self.nav_buttons = {}
+
+        for name, symbol in [
+            ("Dashboard", "◈"),
+            ("Image Scanner", "▧"),
+            ("Duplicate Finder", "⧉"),
+            ("Backup Manager", "⬡"),
+            ("Activity Logs", "≋"),
         ]:
-            frame = tk.Frame(
-                self.notebook, bg="#10131c"
+            button = tk.Button(
+                self.sidebar,
+                text=f"  {symbol}   {name}",
+                command=lambda n=name: self.show_page(n),
+                bg=PANEL, fg=WHITE,
+                activebackground=PANEL2,
+                activeforeground=CYAN,
+                font=("Segoe UI", 10, "bold"),
+                relief="flat", anchor="w",
+                padx=10, pady=13, cursor="hand2"
             )
-            self.tabs[key] = frame
-            self.notebook.add(frame, text=title)
+            button.pack(fill="x", padx=9, pady=3)
+            self.nav_buttons[name] = button
+
+        tk.Frame(
+            self.sidebar, bg="#292746", height=1
+        ).pack(fill="x", padx=15, pady=18)
+
+        tk.Label(
+            self.sidebar, text="SYSTEM STATUS",
+            bg=PANEL, fg=MUTED,
+            font=("Consolas", 9, "bold")
+        ).pack(anchor="w", padx=17)
+
+        tk.Label(
+            self.sidebar, text="●  CORE ONLINE",
+            bg=PANEL, fg=GREEN,
+            font=("Consolas", 10, "bold")
+        ).pack(anchor="w", padx=17, pady=10)
+
+        tk.Label(
+            self.sidebar, text="PYTHON DESKTOP APP",
+            bg=PANEL, fg=MUTED,
+            font=("Consolas", 8)
+        ).pack(side="bottom", pady=18)
+
+        self.content = tk.Frame(body, bg=BG)
+        self.content.pack(side="left", fill="both", expand=True)
+
+        for name in [
+            "Dashboard", "Image Scanner",
+            "Duplicate Finder", "Backup Manager",
+            "Activity Logs"
+        ]:
+            page = tk.Frame(self.content, bg=BG)
+            self.pages[name] = page
 
         self.build_dashboard()
-        self.build_organizer()
+        self.build_scanner()
         self.build_duplicates()
         self.build_backup()
         self.build_logs()
 
-    def card(self, parent, title):
-        frame = tk.Frame(
-            parent, bg="#1b2030", padx=20, pady=18
+        footer = tk.Frame(self.root, bg=BG)
+        footer.pack(fill="x", padx=22, pady=(0, 12))
+
+        self.status_label = tk.Label(
+            footer, text="● SYSTEM READY",
+            bg=BG, fg=GREEN,
+            font=("Consolas", 9)
         )
-        frame.pack(
-            side="left", fill="both",
-            expand=True, padx=8, pady=8
-        )
+        self.status_label.pack(side="left")
 
         tk.Label(
-            frame, text=title,
-            bg="#1b2030", fg="#a78bfa",
-            font=("Segoe UI", 10, "bold")
-        ).pack(anchor="w")
+            footer, text="ADARSH GUPTA  |  TASK AUTOMATION PRO",
+            bg=BG, fg=MUTED,
+            font=("Consolas", 8)
+        ).pack(side="right")
 
-        value = tk.Label(
-            frame, text="0",
-            bg="#1b2030", fg="white",
-            font=("Segoe UI", 29, "bold")
+    def heading(self, parent, title, subtitle):
+        tk.Label(
+            parent, text=title,
+            bg=BG, fg=WHITE,
+            font=("Segoe UI", 23, "bold")
+        ).pack(anchor="w", pady=(8, 3))
+
+        tk.Label(
+            parent, text=subtitle,
+            bg=BG, fg=MUTED,
+            font=("Segoe UI", 10)
+        ).pack(anchor="w", pady=(0, 15))
+
+    def card(self, parent, title, value, color):
+        frame = tk.Frame(
+            parent, bg=PANEL,
+            highlightbackground=color,
+            highlightthickness=1
         )
-        value.pack(anchor="w", pady=10)
+        tk.Label(
+            frame, text=title.upper(),
+            bg=PANEL, fg=MUTED,
+            font=("Consolas", 9, "bold")
+        ).pack(anchor="w", padx=15, pady=(14, 5))
 
-        return value
+        value_label = tk.Label(
+            frame, text=value,
+            bg=PANEL, fg=color,
+            font=("Segoe UI", 25, "bold")
+        )
+        value_label.pack(anchor="w", padx=15, pady=(0, 14))
+        return value_label
+
+    def button(self, parent, text, command, color=CYAN):
+        return tk.Button(
+            parent, text=text,
+            command=command,
+            bg=PANEL2, fg=color,
+            activebackground="#292746",
+            activeforeground=WHITE,
+            font=("Segoe UI", 10, "bold"),
+            relief="flat", bd=0,
+            padx=16, pady=11, cursor="hand2"
+        )
+
+    def show_page(self, name):
+        if self.current_page:
+            self.current_page.pack_forget()
+
+        self.current_page = self.pages[name]
+        self.current_page.pack(fill="both", expand=True)
+
+        for page_name, button in self.nav_buttons.items():
+            button.configure(
+                bg=PANEL2 if page_name == name else PANEL,
+                fg=CYAN if page_name == name else WHITE
+            )
+
+        self.status_label.configure(
+            text=f"● {name.upper()} ACTIVE", fg=GREEN
+        )
+
+        if name == "Activity Logs":
+            self.refresh_logs()
+        elif name == "Dashboard":
+            self.refresh_dashboard()
 
     def build_dashboard(self):
-        tab = self.tabs["dashboard"]
-
+        page = self.pages["Dashboard"]
         self.heading(
-            tab, "Overview Dashboard",
-            "Live statistics of your automation workspace."
+            page, "Command Dashboard",
+            "Your automation control system at a glance."
         )
 
-        cards = tk.Frame(tab, bg="#10131c")
-        cards.pack(fill="x", padx=12)
+        cards = tk.Frame(page, bg=BG)
+        cards.pack(fill="x", pady=5)
 
-        self.stat_source = self.card(cards, "SOURCE IMAGES")
-        self.stat_destination = self.card(
-            cards, "DESTINATION IMAGES"
+        self.image_count = self.card(
+            cards, "Images Found", "0", CYAN
         )
-        self.stat_duplicates = self.card(
-            cards, "DUPLICATE GROUPS"
+        self.duplicate_count = self.card(
+            cards, "Duplicate Groups", "0", PINK
+        )
+        self.backup_count = self.card(
+            cards, "Backups Created", "0", PURPLE
         )
 
-        self.dashboard_status = tk.Label(
-            tab,
-            text="SYSTEM ONLINE",
-            bg="#10131c", fg="#34d399",
-            font=("Segoe UI", 11, "bold")
+        for widget in cards.winfo_children():
+            widget.pack(side="left", fill="both", expand=True, padx=5)
+
+        self.hologram = Hologram(
+            page, height=285
         )
-        self.dashboard_status.pack(
-            anchor="w", padx=22, pady=18
-        )
+        self.hologram.pack(fill="both", expand=True, pady=8)
+
+        tk.Label(
+            page, text="RGB HOLOGRAPHIC ENGINE  •  ONLINE",
+            bg=BG, fg=CYAN,
+            font=("Consolas", 10, "bold")
+        ).pack(pady=5)
 
         self.button(
-            tab, "REFRESH NOW", self.refresh_dashboard
-        ).pack(anchor="w", padx=22)
+            page, "⟳ REFRESH DASHBOARD",
+            self.refresh_dashboard, GREEN
+        ).pack(pady=10)
 
     def refresh_dashboard(self):
         try:
-            self.stat_source.config(
-                text=str(len(scan_images(self.source.get())))
+            images = scan_images(
+                self.project / "destination_images"
             )
-            self.stat_destination.config(
-                text=str(len(scan_images(self.destination.get())))
+            self.image_count.configure(text=str(len(images)))
+
+            backup_dir = self.project / "backups"
+            backups = (
+                list(backup_dir.glob("*.zip"))
+                if backup_dir.exists() else []
             )
+            self.backup_count.configure(text=str(len(backups)))
 
-            self.dashboard_status.config(
-                text="SYSTEM ONLINE | LIVE STATISTICS UPDATED"
+            self.duplicate_count.configure(
+                text=str(len(self.duplicate_groups))
             )
-        except Exception as error:
-            self.logger.exception("Dashboard error")
-            self.dashboard_status.config(
-                text=f"Dashboard error: {error}"
-            )
+        except Exception:
+            self.logger.exception("Dashboard refresh failed")
 
-    def live_refresh(self):
-        if self.root.winfo_exists():
-            self.refresh_dashboard()
-            self.root.after(3000, self.live_refresh)
-
-    def folder_row(self, parent, label, variable):
-        row = tk.Frame(parent, bg="#10131c")
-        row.pack(fill="x", padx=22, pady=7)
-
-        tk.Label(
-            row, text=label, width=13,
-            anchor="w", bg="#10131c",
-            fg="white", font=("Segoe UI", 10, "bold")
-        ).pack(side="left")
-
-        tk.Entry(
-            row, textvariable=variable,
-            bg="#252b3a", fg="white",
-            insertbackground="white",
-            relief="flat"
-        ).pack(side="left", fill="x", expand=True, ipady=8)
-
-        self.button(
-            row, "BROWSE",
-            lambda: self.browse_folder(variable)
-        ).pack(side="left", padx=8)
-
-    def browse_folder(self, variable):
-        folder = filedialog.askdirectory()
-        if folder:
-            variable.set(folder)
-
-    def progress_widgets(self, parent):
-        self.progress = ttk.Progressbar(
-            parent, mode="determinate",
-            style="Horizontal.TProgressbar"
-        )
-        self.progress.pack(
-            fill="x", padx=22, pady=(10, 4)
-        )
-
-        self.progress_label = tk.Label(
-            parent, text="Ready",
-            bg="#10131c", fg="#a78bfa"
-        )
-        self.progress_label.pack(anchor="w", padx=22)
-
-    def update_progress(self, current, total, name):
-        self.progress["maximum"] = max(total, 1)
-        self.progress["value"] = current
-        self.progress_label.config(
-            text=f"{current}/{total}  |  {name}"
-        )
-        self.root.update_idletasks()
-
-    def build_organizer(self):
-        tab = self.tabs["organizer"]
-
+    def build_scanner(self):
+        page = self.pages["Image Scanner"]
         self.heading(
-            tab, "Image Organizer",
-            "Browse folders, preview images and organize safely."
+            page, "Image Scanner",
+            "Scan, preview and organize your image collection."
         )
 
-        self.folder_row(tab, "SOURCE", self.source)
-        self.folder_row(tab, "DESTINATION", self.destination)
-
-        self.organizer_mode = tk.StringVar(value="copy")
-
-        modes = tk.Frame(tab, bg="#10131c")
-        modes.pack(anchor="w", padx=22, pady=10)
-
-        for title, value in [
-            ("Safe Copy", "copy"),
-            ("Move Files", "move")
-        ]:
-            tk.Radiobutton(
-                modes, text=title,
-                variable=self.organizer_mode,
-                value=value,
-                bg="#10131c", fg="white",
-                selectcolor="#252b3a",
-                activebackground="#10131c",
-                activeforeground="white"
-            ).pack(side="left", padx=8)
+        actions = tk.Frame(page, bg=BG)
+        actions.pack(fill="x", pady=8)
 
         self.button(
-            tab, "SCAN IMAGES", self.preview_images
-        ).pack(anchor="w", padx=22, pady=5)
+            actions, "SELECT FOLDER",
+            self.select_image_folder
+        ).pack(side="left", padx=4)
 
         self.button(
-            tab, "START ORGANIZER", self.run_organizer
-        ).pack(anchor="w", padx=22, pady=5)
+            actions, "ORGANIZE / COPY",
+            self.organize_selected, GREEN
+        ).pack(side="left", padx=4)
 
-        self.progress_widgets(tab)
+        self.button(
+            actions, "ORGANIZE / MOVE",
+            lambda: self.organize_selected(move=True), PINK
+        ).pack(side="left", padx=4)
 
-        body = tk.Frame(tab, bg="#10131c")
-        body.pack(fill="both", expand=True, padx=22, pady=12)
+        self.scanner_info = tk.Label(
+            page, text="Select a folder to scan images.",
+            bg=BG, fg=MUTED,
+            font=("Segoe UI", 10)
+        )
+        self.scanner_info.pack(anchor="w", pady=10)
+
+        area = tk.Frame(page, bg=PANEL)
+        area.pack(fill="both", expand=True, pady=8)
 
         self.image_list = tk.Listbox(
-            body, bg="#1b2030", fg="white",
-            selectbackground="#7c3aed",
-            relief="flat", font=("Segoe UI", 10),
-            width=38
+            area, bg=PANEL, fg=WHITE,
+            selectbackground="#41306b",
+            font=("Consolas", 10),
+            relief="flat", width=35
         )
-        self.image_list.pack(side="left", fill="y")
+        self.image_list.pack(
+            side="left", fill="both", expand=True, padx=10, pady=10
+        )
         self.image_list.bind(
-            "<<ListboxSelect>>", self.show_preview
-        )
-
-        preview_frame = tk.Frame(
-            body, bg="#1b2030"
-        )
-        preview_frame.pack(
-            side="left", fill="both",
-            expand=True, padx=12
+            "<<ListboxSelect>>", self.preview_selected
         )
 
         self.preview = tk.Label(
-            preview_frame,
-            text="Select an image to preview",
-            bg="#1b2030", fg="#a78bfa",
-            font=("Segoe UI", 12)
+            area, text="IMAGE PREVIEW",
+            bg=PANEL2, fg=CYAN,
+            font=("Consolas", 12, "bold"),
+            width=32
         )
-        self.preview.pack(expand=True)
-
-        self.organizer_output = tk.Text(
-            tab, height=5,
-            bg="#1b2030", fg="#d1d5db",
-            insertbackground="white",
-            relief="flat", font=("Consolas", 9)
-        )
-        self.organizer_output.pack(
-            fill="x", padx=22, pady=8
+        self.preview.pack(
+            side="right", fill="both", expand=True,
+            padx=10, pady=10
         )
 
-        self.image_files = []
+    def select_image_folder(self):
+        folder = filedialog.askdirectory(
+            title="Select image folder"
+        )
+        if not folder:
+            return
 
-    def preview_images(self):
         try:
-            self.image_files = scan_images(self.source.get())
+            self.image_files = scan_images(folder)
             self.image_list.delete(0, "end")
 
             for path in self.image_files:
                 self.image_list.insert("end", path.name)
 
-            self.preview.config(
-                image="", text=f"{len(self.image_files)} images found"
+            self.scanner_folder = Path(folder)
+            self.scanner_info.configure(
+                text=f"{len(self.image_files)} images found in {folder}",
+                fg=GREEN
             )
-            self.photo_reference = None
-
+            self.logger.info(
+                "Scanned %s images in %s",
+                len(self.image_files), folder
+            )
         except Exception as error:
-            messagebox.showerror("Scan Error", str(error))
+            messagebox.showerror("Scanner Error", str(error))
 
-    def show_preview(self, event=None):
+    def preview_selected(self, event=None):
         selection = self.image_list.curselection()
         if not selection:
             return
@@ -388,168 +455,193 @@ class TaskAutomationApp:
         path = self.image_files[selection[0]]
 
         try:
-            photo = tk.PhotoImage(file=str(path))
-            factor = max(
-                1,
-                math.ceil(max(
-                    photo.width() / 500,
-                    photo.height() / 350
-                ))
+            if Image and ImageTk:
+                img = Image.open(path)
+                img.thumbnail((390, 330))
+                self.preview_image = ImageTk.PhotoImage(img)
+            else:
+                self.preview_image = tk.PhotoImage(file=str(path))
+
+            self.preview.configure(
+                image=self.preview_image, text=""
             )
-            photo = photo.subsample(factor, factor)
-
-            self.photo_reference = photo
-            self.preview.config(image=photo, text="")
-
-        except tk.TclError:
-            self.photo_reference = None
-            self.preview.config(
-                image="",
-                text=(
-                    f"{path.name}\n"
-                    "Preview format not supported by Tkinter.\n"
-                    "File remains safe and unchanged."
-                )
+        except Exception as error:
+            self.preview.configure(
+                image="", text=f"Preview unavailable\n{error}"
             )
 
-    def run_organizer(self):
-        move = self.organizer_mode.get() == "move"
+    def organize_selected(self, move=False):
+        if not getattr(self, "image_files", None):
+            messagebox.showwarning(
+                "No Images", "First select an image folder."
+            )
+            return
 
-        if move and not messagebox.askyesno(
-            "Confirm Move",
-            "Original files will be moved. Continue?"
-        ):
+        destination = filedialog.askdirectory(
+            title="Select destination folder"
+        )
+        if not destination:
+            return
+
+        if Path(destination).resolve() == self.scanner_folder.resolve():
+            messagebox.showwarning(
+                "Invalid Destination",
+                "Choose a different destination folder."
+            )
             return
 
         try:
-            self.progress["value"] = 0
-            self.organizer_output.delete("1.0", "end")
-
             results = organize_images(
-                self.source.get(),
-                self.destination.get(),
-                move=move,
-                progress=self.update_progress
+                self.scanner_folder,
+                destination,
+                move=move
             )
-
-            for name, action, target in results:
-                self.organizer_output.insert(
-                    "end", f"{action}: {name}\n"
-                )
-
             self.logger.info(
-                "Organizer completed: %s files",
+                "Image organization completed: %s files",
                 len(results)
             )
-
-            self.preview_images()
-            self.refresh_dashboard()
-
             messagebox.showinfo(
-                "Completed",
-                f"{len(results)} files processed."
+                "Complete",
+                f"{len(results)} images processed."
             )
-
         except Exception as error:
-            self.logger.exception("Organizer failed")
+            self.logger.exception("Image organization failed")
             messagebox.showerror("Organizer Error", str(error))
 
     def build_duplicates(self):
-        tab = self.tabs["duplicates"]
-
+        page = self.pages["Duplicate Finder"]
         self.heading(
-            tab, "Advanced Duplicate Detector",
-            "Compare file sizes and SHA-256 hashes."
+            page, "Duplicate Detection",
+            "Find identical files using SHA-256 hashing."
         )
 
         self.button(
-            tab, "SCAN PROJECT",
-            self.run_duplicate_scan
-        ).pack(anchor="w", padx=22)
+            page, "SELECT FOLDER & SCAN",
+            self.start_duplicate_scan, PINK
+        ).pack(anchor="w", pady=8)
 
-        self.progress_widgets(tab)
+        self.duplicate_status = tk.Label(
+            page, text="Ready to scan.",
+            bg=BG, fg=MUTED,
+            font=("Segoe UI", 10)
+        )
+        self.duplicate_status.pack(anchor="w", pady=10)
+
+        area = tk.Frame(page, bg=PANEL)
+        area.pack(fill="both", expand=True, pady=8)
 
         self.duplicate_output = tk.Text(
-            tab, bg="#1b2030", fg="#d1d5db",
-            insertbackground="white",
-            relief="flat", font=("Consolas", 10)
+            area, bg=PANEL, fg=WHITE,
+            insertbackground=CYAN,
+            font=("Consolas", 10),
+            relief="flat", wrap="word"
         )
         self.duplicate_output.pack(
-            fill="both", expand=True, padx=22, pady=18
+            fill="both", expand=True, padx=12, pady=12
         )
 
-    def run_duplicate_scan(self):
-        try:
-            self.progress["value"] = 0
-            groups = find_duplicates(
-                self.project,
-                progress=self.update_progress
+    def start_duplicate_scan(self):
+        folder = filedialog.askdirectory(
+            title="Select folder to scan"
+        )
+        if not folder:
+            return
+
+        self.duplicate_status.configure(
+            text="Scanning files...", fg=ORANGE
+        )
+
+        def work():
+            try:
+                groups = find_duplicates(folder)
+                self.root.after(
+                    0, lambda: self.show_duplicates(groups)
+                )
+            except Exception as error:
+                self.root.after(
+                    0, lambda e=error: self.show_error(
+                        "Duplicate Scan Error", e
+                    )
+                )
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def show_duplicates(self, groups):
+        self.duplicate_groups = groups
+        self.duplicate_output.delete("1.0", "end")
+
+        if not groups:
+            self.duplicate_output.insert(
+                "end", "No duplicate files found."
             )
-
-            self.duplicate_output.delete("1.0", "end")
-
-            for number, group in enumerate(groups, 1):
+        else:
+            for index, group in enumerate(groups, 1):
                 self.duplicate_output.insert(
-                    "end", f"\nDUPLICATE GROUP {number}\n"
+                    "end", f"\nGROUP {index}\n"
                 )
                 for path in group:
                     self.duplicate_output.insert(
                         "end", f"  {path}\n"
                     )
 
-            if not groups:
-                self.duplicate_output.insert(
-                    "end", "No duplicates found."
-                )
-
-            self.stat_duplicates.config(text=str(len(groups)))
-            self.logger.info(
-                "Duplicate scan: %s groups", len(groups)
-            )
-
-        except Exception as error:
-            self.logger.exception("Duplicate scan failed")
-            messagebox.showerror("Duplicate Error", str(error))
+        self.duplicate_status.configure(
+            text=f"{len(groups)} duplicate groups found.",
+            fg=GREEN
+        )
+        self.logger.info(
+            "Duplicate scan completed: %s groups", len(groups)
+        )
+        self.refresh_dashboard()
 
     def build_backup(self):
-        tab = self.tabs["backup"]
-
+        page = self.pages["Backup Manager"]
         self.heading(
-            tab, "Backup & Restore Manager",
-            "Create project backups and restore into a separate folder."
+            page, "Backup & Restore",
+            "Create ZIP backups and safely restore archived files."
         )
 
-        self.button(
-            tab, "CREATE ZIP BACKUP",
-            self.run_backup
-        ).pack(anchor="w", padx=22, pady=10)
+        panel = tk.Frame(
+            page, bg=PANEL,
+            highlightbackground=PURPLE,
+            highlightthickness=1
+        )
+        panel.pack(fill="x", pady=15)
+
+        tk.Label(
+            panel, text="BACKUP OPERATIONS",
+            bg=PANEL, fg=CYAN,
+            font=("Consolas", 12, "bold")
+        ).pack(anchor="w", padx=18, pady=(18, 10))
 
         self.button(
-            tab, "RESTORE FROM ZIP",
-            self.run_restore
-        ).pack(anchor="w", padx=22, pady=10)
+            panel, "CREATE BACKUP",
+            self.run_backup, GREEN
+        ).pack(anchor="w", padx=18, pady=8)
+
+        self.button(
+            panel, "RESTORE BACKUP",
+            self.run_restore, PINK
+        ).pack(anchor="w", padx=18, pady=8)
 
         self.backup_status = tk.Label(
-            tab, text="Ready",
-            bg="#10131c", fg="#a78bfa",
-            wraplength=850, justify="left"
+            panel, text="No operation performed yet.",
+            bg=PANEL, fg=MUTED,
+            font=("Consolas", 9),
+            justify="left", wraplength=650
         )
         self.backup_status.pack(
-            anchor="w", padx=22, pady=15
+            anchor="w", padx=18, pady=18
         )
 
     def run_backup(self):
         try:
             archive = create_backup(self.project)
-            self.backup_status.config(
-                text=f"Backup created:\n{archive}"
+            self.backup_status.configure(
+                text=f"Backup created:\n{archive}", fg=GREEN
             )
             self.logger.info("Backup created: %s", archive)
-
-            messagebox.showinfo(
-                "Backup Complete", str(archive)
-            )
-
+            self.refresh_dashboard()
+            messagebox.showinfo("Backup Complete", str(archive))
         except Exception as error:
             self.logger.exception("Backup failed")
             messagebox.showerror("Backup Error", str(error))
@@ -559,14 +651,12 @@ class TaskAutomationApp:
             title="Select backup",
             filetypes=[("ZIP archives", "*.zip")]
         )
-
         if not archive:
             return
 
         destination = filedialog.askdirectory(
             title="Select an EMPTY restore folder"
         )
-
         if not destination:
             return
 
@@ -579,59 +669,79 @@ class TaskAutomationApp:
 
         try:
             restored = restore_backup(archive, destination)
-            self.backup_status.config(
-                text=f"Restored safely into:\n{restored}"
+            self.backup_status.configure(
+                text=f"Restored safely into:\n{restored}",
+                fg=GREEN
             )
             self.logger.info("Backup restored: %s", restored)
-
-            messagebox.showinfo(
-                "Restore Complete", str(restored)
-            )
-
+            messagebox.showinfo("Restore Complete", str(restored))
         except Exception as error:
             self.logger.exception("Restore failed")
             messagebox.showerror("Restore Error", str(error))
 
     def build_logs(self):
-        tab = self.tabs["logs"]
-
+        page = self.pages["Activity Logs"]
         self.heading(
-            tab, "Activity Logs",
+            page, "Activity Logs",
             "Review application events and errors."
         )
 
-        self.log_output = tk.Text(
-            tab, bg="#1b2030", fg="#d1d5db",
-            insertbackground="white",
-            relief="flat", font=("Consolas", 10)
-        )
-        self.log_output.pack(
-            fill="both", expand=True, padx=22, pady=10
-        )
+        actions = tk.Frame(page, bg=BG)
+        actions.pack(fill="x", pady=8)
 
         self.button(
-            tab, "REFRESH LOGS", self.refresh_logs
-        ).pack(anchor="w", padx=22, pady=8)
+            actions, "REFRESH LOGS",
+            self.refresh_logs
+        ).pack(side="left", padx=4)
+
+        self.button(
+            actions, "CLEAR VIEW",
+            lambda: self.log_output.delete("1.0", "end"),
+            PINK
+        ).pack(side="left", padx=4)
+
+        self.log_output = tk.Text(
+            page, bg=PANEL, fg="#d1e5ff",
+            insertbackground=CYAN,
+            relief="flat", font=("Consolas", 10),
+            wrap="word"
+        )
+        self.log_output.pack(
+            fill="both", expand=True, pady=10
+        )
 
     def refresh_logs(self):
-        path = self.project / "logs" / "task_automation.log"
-
         if not hasattr(self, "log_output"):
             return
 
+        path = self.project / "logs" / "task_automation.log"
         self.log_output.delete("1.0", "end")
 
         if path.exists():
-            self.log_output.insert(
-                "end", path.read_text(
+            try:
+                content = path.read_text(
                     encoding="utf-8", errors="replace"
                 )
-            )
+                self.log_output.insert("end", content)
+                self.log_output.see("end")
+            except OSError as error:
+                self.log_output.insert("end", str(error))
         else:
             self.log_output.insert("end", "No logs available.")
+
+    def show_error(self, title, error):
+        self.logger.exception("%s: %s", title, error)
+        self.duplicate_status.configure(
+            text=str(error), fg=PINK
+        )
+        messagebox.showerror(title, str(error))
 
 
 def launch():
     root = tk.Tk()
     TaskAutomationApp(root)
     root.mainloop()
+
+
+if __name__ == "__main__":
+    launch()
