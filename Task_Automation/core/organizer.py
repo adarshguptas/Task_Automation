@@ -10,22 +10,23 @@ def scan_images(folder):
     folder = Path(folder)
     if not folder.is_dir():
         return []
-    return [
+    return sorted(
         p for p in folder.iterdir()
         if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS
-    ]
+    )
 
-def organize_images(source, destination, move=False):
+def organize_images(source, destination, move=False, progress=None):
     source = Path(source)
     destination = Path(destination)
 
     if not source.is_dir():
-        raise FileNotFoundError(f"Source folder not found: {source}")
+        raise FileNotFoundError(source)
 
     destination.mkdir(parents=True, exist_ok=True)
+    files = scan_images(source)
     results = []
 
-    for file in scan_images(source):
+    for index, file in enumerate(files, 1):
         target = destination / file.name
         counter = 1
 
@@ -41,5 +42,8 @@ def organize_images(source, destination, move=False):
             action = "COPIED"
 
         results.append((file.name, action, str(target)))
+
+        if progress:
+            progress(index, len(files), file.name)
 
     return results
